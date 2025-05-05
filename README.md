@@ -66,4 +66,4 @@ Create the original genesis hash found in HiroCoin (requires [xcoin-hash](https:
          the target in compact representation, associated to a difficulty of 1
 
 ### Note
-    It is Case Sensitive
+    When using the command, ensure that algorithm names are entered exactly as specified, as they are case-sensitive. Incorrect casing may result in errors or unexpected behavior.
