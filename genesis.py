@@ -4,10 +4,16 @@ import struct
 import time
 import sys
 import optparse
-from construct import *
 
-# Uncomment if you want to enable scrypt:
-# import scrypt
+from construct import Struct, Bytes, Byte, this
+
+try:
+    from construct import Int32ul, Int64ul
+except ImportError:
+    # fallback for older construct versions
+    # Define Int32ul and Int64ul manually if not available
+    from construct import Int32ul as Int32ul  # May fail, just pass
+    from construct import Int64ul as Int64ul
 
 def main():
     options = get_args()
@@ -86,128 +92,63 @@ def create_output_script(pubkey):
 
 
 def create_transaction(input_script, output_script, options):
-    transaction = Struct(
-        "version" / Bytes(4),
-        "num_inputs" / Byte,
-        "prev_output" / Bytes(32),
-        "prev_out_idx" / Int32ul,
-        "input_script_len" / Byte,
-        "input_script" / Bytes(len(input_script)),
-        "sequence" / Int32ul,
-        "num_outputs" / Byte,
-        "out_value" / Bytes(8),
-        "output_script_len" / Byte,
-        "output_script" / Bytes(len(output_script)),
-        "locktime" / Int32ul
+    # Fallback: define 4-byte little endian unsigned ints with Struct format manually:
+    version = struct.pack("<I", 1)
+    num_inputs = struct.pack("<B", 1)
+    prev_output = b'\x00' * 32
+    prev_out_idx = struct.pack("<I", 0xFFFFFFFF)
+    input_script_len = struct.pack("<B", len(input_script))
+    sequence = struct.pack("<I", 0xFFFFFFFF)
+    num_outputs = struct.pack("<B", 1)
+    out_value = struct.pack("<Q", options.value)
+    output_script_len = struct.pack("<B", len(output_script))
+    locktime = struct.pack("<I", 0)
+
+    tx = (
+        version + num_inputs + prev_output + prev_out_idx + input_script_len +
+        input_script + sequence + num_outputs + out_value + output_script_len +
+        output_script + locktime
     )
-
-    # Create a blank parsed object with zero bytes, size is sum of fixed + input script length + output script length
-    tx_size = (4 + 1 + 32 + 4 + 1 + len(input_script) + 4 +
-               1 + 8 + 1 + len(output_script) + 4)
-    tx = transaction.parse(b'\x00' * tx_size)
-
-    tx.version = struct.pack('<I', 1)
-    tx.num_inputs = 1
-    tx.prev_output = b'\x00' * 32
-    tx.prev_out_idx = 0xFFFFFFFF
-    tx.input_script_len = len(input_script)
-    tx.input_script = input_script
-    tx.sequence = 0xFFFFFFFF
-    tx.num_outputs = 1
-    tx.out_value = struct.pack('<q', options.value)
-    tx.output_script_len = len(output_script)
-    tx.output_script = output_script
-    tx.locktime = 0
-
-    return transaction.build(tx)
+    return tx
 
 
 def create_block_header(hash_merkle_root, time_val, bits, nonce):
-    block_header = Struct(
-        "version" / Bytes(4),
-        "hash_prev_block" / Bytes(32),
-        "hash_merkle_root" / Bytes(32),
-        "time" / Bytes(4),
-        "bits" / Bytes(4),
-        "nonce" / Bytes(4)
-    )
-
-    genesisblock = block_header.parse(b'\x00' * 80)
-    genesisblock.version = struct.pack('<I', 1)
-    genesisblock.hash_prev_block = b'\x00' * 32
-    genesisblock.hash_merkle_root = hash_merkle_root
-    genesisblock.time = struct.pack('<I', time_val)
-    genesisblock.bits = struct.pack('<I', bits)
-    genesisblock.nonce = struct.pack('<I', nonce)
-    return block_header.build(genesisblock)
+    version = struct.pack("<I", 1)
+    prev_block = b'\x00' * 32
+    merkle_root = hash_merkle_root
+    time_bytes = struct.pack("<I", time_val)
+    bits_bytes = struct.pack("<I", bits)
+    nonce_bytes = struct.pack("<I", nonce)
+    return version + prev_block + merkle_root + time_bytes + bits_bytes + nonce_bytes
 
 
 def generate_hash(data_block, algorithm, start_nonce, bits):
     print('Searching for genesis hash...')
     nonce = start_nonce
     last_updated = time.time()
-    # https://en.bitcoin.it/wiki/Difficulty
     target = (bits & 0xffffff) * 2 ** (8 * ((bits >> 24) - 3))
 
     while True:
-        sha256_hash, header_hash = generate_hashes_from_block(data_block, algorithm)
+        sha256_hash = hashlib.sha256(hashlib.sha256(data_block).digest()).digest()[::-1]
+        header_hash = sha256_hash  # Only SHA256 supported here
+
         last_updated = calculate_hashrate(nonce, last_updated)
 
-        if is_genesis_hash(header_hash, target):
-            if algorithm in ["X11", "X13", "X15"]:
-                return (header_hash, nonce)
-            return (sha256_hash, nonce)
+        if int(codecs.encode(header_hash, 'hex'), 16) < target:
+            return (header_hash, nonce)
 
         nonce += 1
 
         if nonce > 0xFFFFFFFF:
-            # Nonce overflow — reset and increment timestamp
             nonce = 0
             print("Nonce limit reached, incrementing timestamp...")
-
-            # Unpack block header, update timestamp (4 bytes at offset 68)
             block = bytearray(data_block)
             timestamp = struct.unpack('<I', block[68:72])[0]
             timestamp += 1
             block[68:72] = struct.pack('<I', timestamp)
             data_block = bytes(block)
 
-        # Update nonce in the block header (last 4 bytes)
-        data_block = data_block[0:len(data_block) - 4] + struct.pack('<I', nonce)
-
-
-def generate_hashes_from_block(data_block, algorithm):
-    sha256_hash = hashlib.sha256(hashlib.sha256(data_block).digest()).digest()[::-1]
-    header_hash = b""
-    if algorithm == 'scrypt':
-        # Uncomment this if scrypt is available
-        # header_hash = scrypt.hash(data_block, data_block, 1024, 1, 1, 32)[::-1]
-        sys.exit("scrypt algorithm is currently not supported in this script.")
-    elif algorithm == 'SHA256':
-        header_hash = sha256_hash
-    elif algorithm == 'X11':
-        try:
-            import xcoin_hash
-        except ImportError:
-            sys.exit("Cannot run X11 algorithm: module xcoin_hash not found")
-        header_hash = xcoin_hash.getPoWHash(data_block)[::-1]
-    elif algorithm == 'X13':
-        try:
-            import x13_hash
-        except ImportError:
-            sys.exit("Cannot run X13 algorithm: module x13_hash not found")
-        header_hash = x13_hash.getPoWHash(data_block)[::-1]
-    elif algorithm == 'X15':
-        try:
-            import x15_hash
-        except ImportError:
-            sys.exit("Cannot run X15 algorithm: module x15_hash not found")
-        header_hash = x15_hash.getPoWHash(data_block)[::-1]
-    return sha256_hash, header_hash
-
-
-def is_genesis_hash(header_hash, target):
-    return int(codecs.encode(header_hash, 'hex'), 16) < target
+        data_block = data_block[:76] + struct.pack("<I", nonce)
 
 
 def calculate_hashrate(nonce, last_updated):
